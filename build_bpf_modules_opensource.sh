@@ -21,12 +21,59 @@ set -xeo pipefail
 # 1) put it into bpf/ dir
 # 2) edit Makefile (add new prog into always += section)
 
-CLANG_PATH="$(pwd)/deps/clang/clang+llvm-5.0.0-linux-x86_64-ubuntu16.04"
-rm -rf ./deps/linux/bpfprog
-mkdir -p ./deps/linux/bpfprog/include
-cp ./katran/lib/Makefile-bpf ./deps/linux/bpfprog/Makefile
-cp -r ./katran/lib/bpf ./deps/linux/bpfprog/
-cp ./katran/lib/linux_includes/bpf_helpers.h ./deps/linux/bpfprog/include/
-cd ./deps/linux/bpfprog && LD_LIBRARY_PATH="${CLANG_PATH}/lib" make \
+# By default it is called from the build dir.
+# Optionally BUILD_DIR and SRC_DIR args can be supplied
+usage() {
+cat 1>&2 <<EOF
+
+Usage ${0##*/} [-h|?] [-s SRC_DIR] [-b BUILD_DIR]
+  -s SRC_DIR                     (optional): Path to source dir for katran
+  -b BUILD_DIR                   (optional): Path to build dir for katran
+  -h|?                                       Show this help message
+EOF
+}
+
+while getopts ":hb:s:m" arg; do
+  case $arg in
+    b)
+      BUILD_DIR="${OPTARG}"
+      ;;
+    s)
+      SRC_DIR="${OPTARG}"
+      ;;
+    h) # Display help.
+      usage
+      exit 0
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+# Validate required parameters
+if [ -z "${BUILD_DIR-}" ] ; then
+  echo -e "[ INFO ] BUILD_DIR is not set. So setting it as default to $(pwd)"
+  BUILD_DIR="$(pwd)/_build/"
+fi
+
+# Validate required parameters
+if [ -z "${SRC_DIR-}" ] ; then
+  echo -e "[ INFO ] SRC_DIR is not set. So setting it as default to $(pwd) "
+  SRC_DIR="$(pwd)"
+fi
+
+
+CLANG_PATH="${BUILD_DIR}/deps/clang/clang+llvm-8.0.0-x86_64-linux-gnu-ubuntu-18.04"
+if [ -f /etc/redhat-release ]; then
+  CLANG_PATH=/usr
+fi
+
+rm -rf "${BUILD_DIR}/deps/bpfprog"
+mkdir -p "${BUILD_DIR}/deps/bpfprog/include"
+cp "${SRC_DIR}/katran/lib/Makefile-bpf" "${BUILD_DIR}/deps/bpfprog/Makefile"
+cp -r "${SRC_DIR}/katran/lib/bpf" "${BUILD_DIR}/deps/bpfprog/"
+cp -r "${SRC_DIR}/katran/decap/bpf" "${BUILD_DIR}/deps/bpfprog/"
+cp "${SRC_DIR}"/katran/lib/linux_includes/* "${BUILD_DIR}/deps/bpfprog/include/"
+cd "${BUILD_DIR}/deps/bpfprog" && LD_LIBRARY_PATH="${CLANG_PATH}/lib" make \
+  EXTRA_CFLAGS="$*" \
   LLC="${CLANG_PATH}/bin/llc" CLANG="${CLANG_PATH}/bin/clang"
 echo "BPF BUILD COMPLITED"

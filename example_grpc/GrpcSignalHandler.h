@@ -19,10 +19,7 @@
 #include <memory>
 
 #include <folly/io/async/AsyncSignalHandler.h>
-
-namespace grpc {
-class Server;
-}
+#include <grpc++/grpc++.h>
 
 namespace folly {
 class EventBase;

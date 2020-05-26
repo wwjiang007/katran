@@ -20,6 +20,11 @@ root xdp program).
 to show how packets look on the wire.
 
 ### Starting katran
+As a first step make sure that BPF's jit is enabled (for best possible performance):
+net.core.bpf_jit_enable sysctl should be set to 1:
+```
+sysctl net.core.bpf_jit_enable=1
+```
 
 We are going to use gRPC in our example (but all this steps
 are applicable to thrift as well. They are intentionally written 
@@ -139,7 +144,7 @@ standalone mode is when katran is attached to the interface directly (and you wo
 be able to run any other XDP program on this interface)
 
 ```
-$ sudo ./build/example_grpc/katran_server_grpc -balancer_prog ./deps/linux/bpfprog/bpf/balancer_kern.o -default_mac 52:54:00:12:35:02 -forwarding_cores=0 -healthchecker_prog ./deps/linux/bpfprog/bpf/healthchecking_ipip.o -intf=enp0s3 -ipip_intf=ipip0 -ipip6_intf=ipip60 -lru_size=10000
+$ sudo ./build/example_grpc/katran_server_grpc -balancer_prog ./deps/bpfprog/bpf/balancer_kern.o -default_mac 52:54:00:12:35:02 -forwarding_cores=0 -healthchecker_prog ./deps/bpfprog/bpf/healthchecking_ipip.o -intf=enp0s3 -ipip_intf=ipip0 -ipip6_intf=ipip60 -lru_size=10000
 ```
 
 In this example:
@@ -192,7 +197,7 @@ if needed, in front of load balancer.
 
 
 ```
-$ sudo ./build/example_grpc/katran_server_grpc -balancer_prog ./deps/linux/bpfprog/bpf/balancer_kern.o -default_mac 52:54:00:12:35:02 -forwarding_cores=0 -healthchecker_prog ./deps/linux/bpfprog/bpf/healthchecking_ipip.o -intf=enp0s3 -ipip_intf=ipip0 -ipip6_intf=ipip60 -lru_size=10000 -map_path /sys/fs/bpf/jmp_eth0 -prog_pos=2
+$ sudo ./build/example_grpc/katran_server_grpc -balancer_prog ./deps/bpfprog/bpf/balancer_kern.o -default_mac 52:54:00:12:35:02 -forwarding_cores=0 -healthchecker_prog ./deps/bpfprog/bpf/healthchecking_ipip.o -intf=enp0s3 -ipip_intf=ipip0 -ipip6_intf=ipip60 -lru_size=10000 -map_path /sys/fs/bpf/jmp_eth0 -prog_pos=2
 ```
 
 ### Configuring healthchecks forwarding
@@ -215,7 +220,7 @@ For v6 VIP we are using only one real with address: `fc00:200::1`
 To configure so_mark to real mapping, we are going to use go client that we built earlier:
 
 ```
-$ cp  ./katran_goclient ./katran_goclient
+$ cp  ./example_grpc/goclient/bin/main ./katran_goclient
 $ ./katran_goclient -new_hc 10.200.200.1 -somark 1000
 exiting
 $ ./katran_goclient -new_hc 10.200.200.2 -somark 1001
@@ -237,7 +242,41 @@ exiting
 Now let’s open second screen and run tcpdump program there with filter "proto 4 or proto 41"
 this filter will match all ipip or ip6ip6 packets.
 
-In the first screen lets run our helper python program to generate udp packets toward 10.100.1.1 and fc00:100::1 (our VIPs)
+lets use this simple python script to emulate a program which is doing healthchecks (hc_it_client.py)
+
+```python
+#!/usr/bin/env python
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+import socket
+import sys
+import time
+
+SO_MARK = 36
+
+
+def send_packet(fam, num, dst, fwmark):
+    if fam == "4":
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    else:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, SO_MARK, int(fwmark))
+    for _i in range(0, int(num)):
+        s.sendto("PING", (dst, 1337))
+        time.sleep(1)
+
+
+def main():
+    send_packet(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+
+
+if __name__ == "__main__":
+    main()
+```
+
+In the first screen lets run our helper python program to generate udp packets toward `10.100.1.1` and `fc00:100::1` (our VIPs)
 
 ```
 $ sudo python hc_it_client.py 4 4 10.100.1.1  1000  # 4 packets with dst 10.100.1.1 and socket mark 1000

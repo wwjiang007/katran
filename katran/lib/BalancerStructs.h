@@ -30,6 +30,11 @@ struct ctl_value {
   };
 };
 
+// mac address for healthchecking
+struct hc_mac {
+  uint8_t mac[6];
+};
+
 // vip's definition for lookup
 struct vip_definition {
   union {
@@ -39,6 +44,13 @@ struct vip_definition {
   uint16_t port;
   uint8_t proto;
 };
+
+// metadata for perfpipe event
+struct event_metadata {
+  uint32_t event;
+  uint32_t pkt_size;
+  uint32_t data_len;
+} __attribute__((__packed__));
 
 // result of vip's lookup
 struct vip_meta {
@@ -75,4 +87,15 @@ struct real_pos_lru {
   uint64_t atime;
 };
 
+// key for longest prefix match ipv4 map
+struct v4_lpm_key {
+    uint32_t prefixlen;
+    uint32_t addr;
+};
+
+// key for longest prefix match ipv6 map
+struct v6_lpm_key {
+    uint32_t prefixlen;
+    uint32_t addr[4];
+};
 } // namespace katran

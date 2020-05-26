@@ -1,35 +1,43 @@
-cmake_minimum_required (VERSION 3.0)
-enable_testing()
-project (libkatran_tests)
+# find libraries
+find_library(CHHELPERS chhelpers)
+find_path(CHHELPERS_INCLUDE_DIR chhelpers)
+include(KatranTest)
 
-add_executable(iphelpers-tests IpHelpersTest.cpp)
-target_link_libraries(iphelpers-tests
-    "${GTEST}"
-    "${PTHREAD}"
-    iphelpers
+katran_add_test(TARGET iphelpers-tests
+  SOURCES
+  IpHelpersTest.cpp
+  DEPENDS
+  iphelpers
+  ${GTEST}
+  ${PTHREAD}
+  "Folly::folly"
 )
 
-add_executable(chhelpers-tests CHHelpersTest.cpp)
-target_link_libraries(chhelpers-tests
-    "${GTEST}"
-    "${PTHREAD}"
-    chhelpers
+katran_add_test(TARGET chhelpers-tests
+  SOURCES
+  CHHelpersTest.cpp
+  DEPENDS
+  katranlb
+  ${GTEST}
+  ${PTHREAD}
 )
 
-add_executable(libkatran-tests KatranLbTest.cpp)
-target_link_libraries(libkatran-tests
-    "${GTEST}"
-    "${PTHREAD}"
-    katranlb
+katran_add_test(TARGET libkatran-tests
+  SOURCES
+  KatranLbTest.cpp
+  DEPENDS
+  katranlb
+  ${GTEST}
+  ${PTHREAD}
+  "Folly::folly"
 )
 
-add_executable(vip-tests VipTest.cpp)
-target_link_libraries(vip-tests
-    "${GTEST}"
-    "${PTHREAD}"
-    katranlb
+katran_add_test(TARGET vip-tests
+  SOURCES
+  VipTest.cpp
+  DEPENDS
+  katranlb
+  ${GTEST}
+  ${PTHREAD}
+  "Folly::folly"
 )
-add_test(IpHelpersTests iphelpers-tests)
-add_test(CHHelpersTests chhelpers-tests)
-add_test(LibKatranTests libkatran-tests)
-add_test(VipTests vip-tests)

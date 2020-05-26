@@ -63,10 +63,10 @@ type KatranClient struct {
 	client lb_katran.KatranServiceClient
 }
 
-func (kc *KatranClient) Init() {
+func (kc *KatranClient) Init(serverAddr string) {
 	var opts []grpc.DialOption
 	opts = append(opts, grpc.WithInsecure())
-	conn, err := grpc.Dial("127.0.0.1:50051", opts...)
+	conn, err := grpc.Dial(serverAddr, opts...)
 	if err != nil {
 		log.Fatalf("Can't connect to local katran server! err is %v\n", err)
 	}
@@ -476,6 +476,24 @@ func (kc *KatranClient) ShowPerVipStats() {
 			statsMap[key+":pkts"] = stats.V1
 			statsMap[key+":bytes"] = stats.V2
 		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func (kc *KatranClient) ShowIcmpStats() {
+	oldIcmpV4 := uint64(0)
+	oldIcmpV6 := uint64(0)
+	for true {
+		icmps, err := kc.client.GetIcmpTooBigStats(
+			context.Background(), &lb_katran.Empty{})
+		checkError(err)
+		diffIcmpV4 := icmps.V1 - oldIcmpV4
+		diffIcmpV6 := icmps.V2 - oldIcmpV6
+		fmt.Printf(
+			"ICMP \"packet too big\": v4 %v pkts/sec v6: %v pkts/sec\n",
+			diffIcmpV4, diffIcmpV6)
+		oldIcmpV4 = icmps.V1
+		oldIcmpV6 = icmps.V2
 		time.Sleep(1 * time.Second)
 	}
 }

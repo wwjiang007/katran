@@ -1,6 +1,7 @@
-# katran
+![alt text](logo.png "Katran")
 
-[![Build Status](https://travis-ci.org/facebookincubator/katran.svg?branch=master)](https://travis-ci.org/facebookincubator/katran)
+[![Travis Build Status](https://travis-ci.org/facebookincubator/katran.svg?branch=master)](https://travis-ci.org/facebookincubator/katran)
+[![CI Status](https://github.com/facebookincubator/katran/workflows/CI/badge.svg?branch=master)](https://github.com/facebookincubator/katran/actions?workflow=CI)
 
 Katran is a C++ library and [`BPF`](https://en.wikipedia.org/wiki/Berkeley_Packet_Filter) program to build high-performance
 layer 4 load balancing forwarding plane. Katran leverages [`XDP infrastructure`](https://www.iovisor.org/technology/xdp)
@@ -24,7 +25,7 @@ See the detailed features' description below -
 ### Examples of usage:
 
 We provide simple examples of katran library usage w/ thrift and gRPC endpoints. 
-Please refer to [`Examples`](EXAMPLES.md) for more detailed information.
+Please refer to [`Examples`](EXAMPLE.md) for more detailed information.
 
 ### Installation:
 
@@ -38,8 +39,6 @@ If you need to build it for other Linux distributions, you need to make sure tha
     - [`folly`](https://github.com/facebook/folly)
     - recent version of clang compiler (6.0+)
     - glog/gtest/gflags/elf libraries
-    - [`wangle`](https://github.com/facebook/wangle)
-    - recent version of [`linux kernel src`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git)
 
 Additionally, if you want to build examples, [`fbthrift`](https://github.com/facebook/fbthrift) and [`gRPC`](https://github.com/grpc/grpc) must be installed, as well!
 

@@ -22,21 +22,36 @@
  * parsing etc)
  */
 
-#include <uapi/linux/ip.h>
-#include <uapi/linux/ipv6.h>
-#include <uapi/linux/icmp.h>
-#include <uapi/linux/icmpv6.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/icmp.h>
+#include <linux/icmpv6.h>
 #include <stddef.h>
-#include <uapi/linux/tcp.h>
-#include <uapi/linux/udp.h>
-#include <uapi/linux/bpf.h>
-#include <uapi/linux/if_ether.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+#include <linux/if_ether.h>
+#include <linux/ptrace.h>
+#include <stdbool.h>
 
 #include "balancer_consts.h"
+#include "balancer_helpers.h"
+#include "bpf.h"
 
-struct quic_header {
+struct quic_long_header {
   __u8 flags;
-  __u64 connection_id;
+  __u32 version;
+  // Pre draft-22: Dest Conn Id Len(4 bits) | Source Conn Id Len(4 bits)
+  // Post draft-22: Dest Conn Id Len (8 bits)
+  __u8 conn_id_lens;
+  // conn-id len can be of either 0 bytes in length or between 4 and 18 bytes
+  // For routing, katran requires minimum of 'QUIC_MIN_CONNID_LEN',
+  // and doesn't read beyond that
+  __u8 dst_connection_id[QUIC_MIN_CONNID_LEN];
+} __attribute__((__packed__));
+
+struct quic_short_header {
+  __u8 flags;
+  __u8 connection_id[QUIC_MIN_CONNID_LEN];
 } __attribute__((__packed__));
 
 struct eth_hdr {
@@ -124,32 +139,63 @@ static inline int parse_quic(void *data, void *data_end,
 
   bool is_icmp = (pckt->flags & F_ICMP);
   __u64 off = calc_offset(is_ipv6, is_icmp);
-  struct quic_header *q_hdr;
   int flags;
-  // offset points to the beginning of transport header (udp)
-  // of quic's packet
-  if ((data + off + sizeof(struct udphdr) +
-       sizeof(struct quic_header)) > data_end) {
+  // offset points to the beginning of transport header (udp) of quic's packet
+  /*                                      |QUIC PKT TYPE|           */
+  if ((data + off + sizeof(struct udphdr) + sizeof(__u8)) > data_end) {
     return FURTHER_PROCESSING;
   }
 
-  q_hdr = data + off + sizeof(struct udphdr);
-  flags = q_hdr->flags;
-  if ((flags & (QUIC_LONG_HEADER | CLIENT_GENERATED_ID)) > QUIC_LONG_HEADER) {
-    // this is long header but with client's generated connection id.
-    return FURTHER_PROCESSING;
-  }
-  if (!(flags & QUIC_LONG_HEADER)) {
-    // short header
-    if (!(flags & QUIC_CONN_ID_PRESENT)) {
-      // but w/o connection-id
+  __u8* quic_data = data + off + sizeof(struct udphdr);
+  __u8* pkt_type = quic_data;
+  __u8* connId = NULL;
+  // the position of conn id varies depending on whether the packet has a
+  // long-header or short-header.
+  // Once we compute the offset of conn id, just read fixed length,
+  // even if the connid len can be of 0 or 4-18 bytes, since katran is only
+  // concerned about the first 16 bits in Dest Conn Id
+  if ((*pkt_type & QUIC_LONG_HEADER) == QUIC_LONG_HEADER) {
+    // packet with long header
+    if (quic_data + sizeof(struct quic_long_header) > data_end) {
       return FURTHER_PROCESSING;
     }
+    if ((*pkt_type & QUIC_PACKET_TYPE_MASK) < QUIC_HANDSHAKE) {
+      // for client initial and 0rtt packet - fall back to use c. hash, since
+      // the connection-id is not the server-chosen one.
+      return FURTHER_PROCESSING;
+    }
+
+    struct quic_long_header* long_header = (struct quic_long_header*) quic_data;
+    if (long_header->version == QUIC_VERSION_MVFST_OLD) {
+      // first 4 bits in the conn Id specifies the length of 'dest conn id'
+      if ((long_header->conn_id_lens >> 4) < QUIC_MIN_CONNID_LEN) {
+        // conn id is not long enough
+        return FURTHER_PROCESSING;
+      }
+    } else {
+      // Post draft version 22, this byte is the conn id length of dest conn id
+      if (long_header->conn_id_lens < QUIC_MIN_CONNID_LEN) {
+        return FURTHER_PROCESSING;
+      }
+    }
+    connId = long_header->dst_connection_id;
+  } else {
+    // short header: just read the connId
+    if (quic_data + sizeof(struct quic_short_header) > data_end) {
+      return FURTHER_PROCESSING;
+    }
+    connId = ((struct quic_short_header*)quic_data)->connection_id;
   }
-  // either long header which always has connection id; or short one but id
-  // presents. we use first 12 bits of connection-id as index for real.
-  // connection-id field size is 64 bits
-  return ((q_hdr->connection_id) >> 52);
+  if (!connId) {
+    return FURTHER_PROCESSING;
+  }
+  // connId schema v2: if first two bits contain the right version info
+  if ((connId[0] >> 6) == QUIC_CONNID_VERSION) {
+    // extract last 16 bits from the first 18 bits:
+    //            last 6 bits         +    8 bits        +   first 2 bits
+    return ((connId[0] & 0x3F) << 10) | (connId[1] << 2) | (connId[2] >> 6);
+  }
+  return FURTHER_PROCESSING;
 }
 
 #endif // of  __PCKT_PARSING_H

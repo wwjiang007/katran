@@ -16,252 +16,580 @@
  # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 set -xeo pipefail
-NCPUS=$(cat /proc/cpuinfo  | grep processor | wc -l)
+NCPUS=$(nproc)
+# default to 4 threads for a reasonable build speed (e.g in travis)
+if (( NCPUS < 4 )); then
+  NCPUS=4
+fi
 ROOT_DIR=$(pwd)
-DEPS_DIR="${ROOT_DIR}/deps"
-CLANG_DIR="${DEPS_DIR}/clang/clang+llvm-5.0.0-linux-x86_64-ubuntu16.04"
 
-if [ ! -z "$FORCE_INSTALL" ]; then
+# Useful constants
+COLOR_RED="\033[0;31m"
+COLOR_GREEN="\033[0;32m"
+COLOR_OFF="\033[0m"
+
+usage() {
+cat 1>&2 <<EOF
+
+Usage ${0##*/} [-h|?] [-p PATH] [-i INSTALL_DIR]
+  -p BUILD_DIR                       (optional): Path to the base dir for katran
+  -i INSTALL_DIR                     (optional): Install prefix path
+  -h|?                                           Show this help message
+EOF
+}
+
+while getopts ":hp:i:m" arg; do
+  case $arg in
+    p)
+      BUILD_DIR="${OPTARG}"
+      ;;
+    i)
+      INSTALL_DIR="${OPTARG}"
+      ;;
+    h | *) # Display help.
+      usage
+      exit 0
+      ;;
+  esac
+done
+
+# Validate required parameters
+if [ -z "${BUILD_DIR-}" ] ; then
+  echo -e "${COLOR_RED}[ INFO ] Build dir is not set. So going to build into _build ${COLOR_OFF}"
+  BUILD_DIR=${ROOT_DIR}/_build
+  mkdir -p "$BUILD_DIR"
+fi
+
+cd "$BUILD_DIR" || exit
+DEPS_DIR=$BUILD_DIR/deps
+mkdir -p "$DEPS_DIR" || exit
+
+if [ -z "${INSTALL_DIR-}" ] ; then
+  echo -e "${COLOR_RED}[ INFO ] Install dir is not set. So going to install into ${DEPS_DIR} ${COLOR_OFF}"
+  INSTALL_DIR=${DEPS_DIR}
+  mkdir -p "$INSTALL_DIR"
+fi
+
+if [ -n "$FORCE_INSTALL" ]; then
     rm -rf ./deps
+    rm -rf "$BUILD_DIR"
 fi
 
-if [ -z "$BUILD_EXAMPLE" ]; then
-    BUILD_EXAMPLE=1
-    export CMAKE_BUILD_EXAMPLE="$BUILD_EXAMPLE"
+if [ -n "$BUILD_EXAMPLE_THRIFT" ]; then
+    BUILD_EXAMPLE_THRIFT=1
+    export CMAKE_BUILD_EXAMPLE_THRIFT="$BUILD_EXAMPLE_THRIFT"
 fi
 
-mkdir deps || true
+if [ -z "$BUILD_EXAMPLE_GRPC" ]; then
+    BUILD_EXAMPLE_GRPC=1
+    export CMAKE_BUILD_EXAMPLE_GRPC="$BUILD_EXAMPLE_GRPC"
+fi
 
 get_dev_tools() {
-    sudo apt-get update
-    sudo apt-get install -y \
-        build-essential \
-        cmake \
-        libbison-dev \
-        bison \
-        flex \
-        bc
-}
-
-get_folly() {
-    if [ -f "deps/folly_installed" ]; then
-        return
+    if [ -f /etc/redhat-release ]; then
+        sudo yum install -y epel-release
+        sudo yum-config-manager --enable PowerTools
+        sudo yum groupinstall -y "Development Tools"
+        sudo yum install -y cmake
+    else
+        sudo apt-get update
+        sudo apt-get install -y   \
+            build-essential       \
+            cmake                 \
+            libbison-dev          \
+            bison                 \
+            flex                  \
+            bc                    \
+            libbpfcc-dev
     fi
-    rm -rf deps/folly
-	sudo apt-get install -y \
-		g++ \
-		automake \
-		autoconf \
-		autoconf-archive \
-		libtool \
-		libboost-all-dev \
-		libevent-dev \
-		libdouble-conversion-dev \
-		libgoogle-glog-dev \
-		libgflags-dev \
-		liblz4-dev \
-		liblzma-dev \
-		libsnappy-dev \
-		make \
-		zlib1g-dev \
-		binutils-dev \
-		libjemalloc-dev \
-		libssl-dev \
-		pkg-config \
-    	libiberty-dev \
-        libunwind8-dev \
-        libdwarf-dev
-
-    pushd .
-	cd deps
-	git clone https://github.com/facebook/folly --depth 1
-	cd folly/build
-  cmake ..
-  make -j $NCPUS
-  sudo make install
-  popd
-  touch deps/folly_installed
-}
-
-get_clang() {
-    if [ -f "deps/clang_installed" ]; then
-        return
-    fi
-    rm -rf deps/clang
-    pushd .
-    cd deps
-    mkdir clang
-    cd clang
-    wget http://releases.llvm.org/5.0.0/clang+llvm-5.0.0-linux-x86_64-ubuntu16.04.tar.xz
-    tar xvf ./clang+llvm-5.0.0-linux-x86_64-ubuntu16.04.tar.xz
-    popd
-    touch deps/clang_installed
 }
 
 get_required_libs() {
-    sudo apt-get install -y \
-        libgoogle-glog-dev \
-        libgflags-dev \
-        libelf-dev \
-        libmnl-dev \
-        liblzma-dev \
-        libre2-dev
+    if [ -f /etc/redhat-release ]; then
+        sudo yum install -y \
+            git \
+            elfutils-libelf-devel \
+            libmnl-devel \
+            xz-devel \
+            re2-devel \
+            libatomic-static \
+            libsodium-static
+    else
+        sudo apt-get install -y    \
+            libgoogle-glog-dev     \
+            libgflags-dev          \
+            libelf-dev             \
+            libmnl-dev             \
+            liblzma-dev            \
+            libre2-dev
+        sudo apt-get install -y libsodium-dev
+    fi
 }
 
-get_linux() {
-    if [ -f "deps/linux_installed" ]; then
+
+get_libevent() {
+    if [ ! -f /etc/redhat-release ]; then
+        # not needed on ubuntu as it is available as a package
         return
     fi
-    rm -rf deps/linux
+
+    if [ -f "${DEPS_DIR}/libevent_installed" ]; then
+        return
+    fi
+
+    EVENT_DIR=$DEPS_DIR/event
+    EVENT_BUILD_DIR=$DEPS_DIR/event/_build
+    rm -rf "$EVENT_DIR"
     pushd .
-    cd deps
-    git clone --branch v4.15 --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
-    cd linux
-    make defconfig
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning libevent repo ${COLOR_OFF}"
+    git clone https://github.com/libevent/libevent --depth 1 --branch release-2.1.11-stable "$EVENT_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Building libevent ${COLOR_OFF}"
+    mkdir -p "$EVENT_BUILD_DIR"
+    cd "$EVENT_BUILD_DIR" || exit
+
+    cmake -DEVENT__DISABLE_SAMPLES=on -DEVENT__DISABLE_TESTS=on -DCXX_STD=gnu++14       \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}Libevent is installed ${COLOR_OFF}"
     popd
-    touch deps/linux_installed
+    touch "${DEPS_DIR}/libevent_installed"
+}
+
+get_gflags() {
+    if [ ! -f /etc/redhat-release ]; then
+        # not needed on ubuntu as it is available as a package
+        return
+    fi
+
+    if [ -f "${DEPS_DIR}/gflags_installed" ]; then
+        return
+    fi
+    GFLAGS_DIR=$DEPS_DIR/gflags
+    GFLAGS_BUILD_DIR=$DEPS_DIR/gflags/_build
+    rm -rf "$GFLAGS_DIR"
+    pushd .
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning gflags repo ${COLOR_OFF}"
+    git clone https://github.com/gflags/gflags --depth 1 --branch v2.2.2 "$GFLAGS_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Building gflags ${COLOR_OFF}"
+    mkdir -p "$GFLAGS_BUILD_DIR"
+    cd "$GFLAGS_BUILD_DIR" || exit
+
+    cmake  -DCXX_STD=gnu++14                        \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}Gflags is installed ${COLOR_OFF}"
+    popd
+    touch "${DEPS_DIR}/gflags_installed"
+}
+
+get_folly() {
+    if [ -f "${DEPS_DIR}/folly_installed" ]; then
+        return
+    fi
+    FOLLY_DIR=$DEPS_DIR/folly
+    FOLLY_BUILD_DIR=$DEPS_DIR/folly/build
+
+    rm -rf "$FOLLY_DIR"
+    if [ -f /etc/redhat-release ]; then
+        sudo yum install -y \
+            boost-devel \
+            boost-static \
+            lz4-devel \
+            xz-devel \
+            snappy-devel \
+            zlib-devel \
+            zlib-static \
+            glog-devel \
+            python3-scons \
+            double-conversion-devel \
+            openssl-devel \
+            libdwarf-devel \
+            elfutils-devel elfutils-devel-static \
+            libunwind-devel \
+            bzip2-devel \
+            binutils-devel
+    else
+        sudo apt-get install -y       \
+            g++                       \
+            automake                  \
+            autoconf                  \
+            autoconf-archive          \
+            libtool                   \
+            libboost-all-dev          \
+            libevent-dev              \
+            libdouble-conversion-dev  \
+            libgoogle-glog-dev        \
+            libgflags-dev             \
+            liblz4-dev                \
+            liblzma-dev               \
+            libsnappy-dev             \
+            make                      \
+            zlib1g-dev                \
+            binutils-dev              \
+            libjemalloc-dev           \
+            libssl-dev                \
+            pkg-config                \
+            libiberty-dev             \
+            libunwind8-dev            \
+            libdwarf-dev
+    fi
+
+    pushd .
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning folly repo ${COLOR_OFF}"
+    git clone https://github.com/facebook/folly --depth 1 "$FOLLY_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Building Folly ${COLOR_OFF}"
+    mkdir -p "$FOLLY_BUILD_DIR"
+    cd "$FOLLY_BUILD_DIR" || exit
+
+    cmake  -DCXX_STD=gnu++14                        \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}Folly is installed ${COLOR_OFF}"
+    popd
+    touch "${DEPS_DIR}/folly_installed"
+}
+
+get_clang() {
+    if [ -f "${DEPS_DIR}/clang_installed" ]; then
+        return
+    fi
+
+    if [ -f /etc/redhat-release ]; then
+        sudo yum install -y clang llvm
+    else
+        CLANG_DIR=$DEPS_DIR/clang
+        rm -rf "$CLANG_DIR"
+        pushd .
+        mkdir -p "$CLANG_DIR"
+        cd "$CLANG_DIR"
+        echo -e "${COLOR_GREEN}[ INFO ] Downloading Clang ${COLOR_OFF}"
+        wget http://releases.llvm.org/8.0.0/clang+llvm-8.0.0-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+        tar xvf ./clang+llvm-8.0.0-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+        echo -e "${COLOR_GREEN}Clang is installed ${COLOR_OFF}"
+        popd
+    fi
+    touch "${DEPS_DIR}/clang_installed"
 }
 
 get_gtest() {
-    if [ -f "deps/googletest_installed" ]; then
+    if [ -f "${DEPS_DIR}/googletest_installed" ]; then
         return
     fi
-    rm -rf deps/googletest
+    GTEST_DIR=${DEPS_DIR}/googletest
+    GTEST_BUILD_DIR=${DEPS_DIR}/googletest/build
+
+    rm -rf "$GTEST_DIR"
     pushd .
-    cd deps
+    mkdir -p "$GTEST_DIR"
+    cd "$GTEST_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning googletest repo ${COLOR_OFF}"
     git clone --depth 1 https://github.com/google/googletest
-    cd googletest
-    mkdir build
-    cd build
-    cmake ..
-    make && sudo make install
+    mkdir -p "$GTEST_BUILD_DIR"
+    cd "$GTEST_BUILD_DIR"
+    cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo         \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ../googletest
+    make install
+    echo -e "${COLOR_GREEN}googletest is installed ${COLOR_OFF}"
     popd
-    touch deps/googletest_installed
+    touch "${DEPS_DIR}/googletest_installed"
 }
 
 get_mstch() {
-    if [ -f "deps/mstch_installed" ]; then
+    if [ -f "${DEPS_DIR}/mstch_installed" ]; then
         return
     fi
-    rm -rf deps/mstch
+    MSTCH_DIR=${DEPS_DIR}/mstch
+    MSTCH_BUILD_DIR=${DEPS_DIR}/mstch/build
+    rm -rf "${MSTCH_DIR}"
     pushd .
-    cd deps
+    cd "${DEPS_DIR}"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning mstch repo ${COLOR_OFF}"
     git clone --depth 1 https://github.com/no1msd/mstch
-    mkdir -p mstch/build
-    cd mstch/build
-    cmake ..
-    make -j $NCPUS
-    sudo make install
+    mkdir -p "${MSTCH_BUILD_DIR}"
+    cd "${MSTCH_BUILD_DIR}" || exit
+    cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo         \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+    make -j "$NCPUS"
+    make install
     popd
-    touch deps/mstch_installed
+    echo -e "${COLOR_GREEN}mstch is installed ${COLOR_OFF}"
+    touch "${DEPS_DIR}/mstch_installed"
+}
+
+get_fizz() {
+    if [ -f "${DEPS_DIR}/fizz_installed" ]; then
+        return
+    fi
+    FIZZ_DIR=$DEPS_DIR/fizz
+    FIZZ_BUILD_DIR=$DEPS_DIR/fizz/build/
+    rm -rf "${FIZZ_DIR}"
+    pushd .
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning fizz repo ${COLOR_OFF}"
+    git clone https://github.com/facebookincubator/fizz "$FIZZ_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] install dependencies ${COLOR_OFF}"
+
+    echo -e "${COLOR_GREEN}Building Fizz ${COLOR_OFF}"
+    mkdir -p "$FIZZ_BUILD_DIR"
+    cd "$FIZZ_BUILD_DIR" || exit
+    cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo       \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"     \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"  \
+      -DBUILD_TESTS=OFF                      \
+      "$FIZZ_DIR/fizz"
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}Fizz is installed ${COLOR_OFF}"
+    popd
+    echo -e "${COLOR_GREEN}Fizz is installed ${COLOR_OFF}"
+    touch "${DEPS_DIR}/fizz_installed"
 }
 
 get_wangle() {
-    if [ -f "deps/wangle_installed" ]; then
+    if [ -f "${DEPS_DIR}/wangle_installed" ]; then
         return
     fi
-    rm -rf deps/wangle
+    WANGLE_DIR=$DEPS_DIR/wangle
+    WANGLE_BUILD_DIR=$DEPS_DIR/wangle/build/
+    rm -rf "$WANGLE_DIR"
     pushd .
-    cd deps
-    git clone --depth 1 https://github.com/facebook/wangle
-    cd wangle/wangle
-    cmake .
-    make -j $NCPUS
-    sudo make install
+    cd "${DEPS_DIR}"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning wangle repo ${COLOR_OFF}"
+    git clone --depth 1 https://github.com/facebook/wangle "$WANGLE_DIR"
+    mkdir -p "$WANGLE_BUILD_DIR"
+    cd "$WANGLE_BUILD_DIR" || exit
+    echo -e "${COLOR_GREEN}Building Wangle ${COLOR_OFF}"
+    cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo         \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ../wangle
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}wangle is installed ${COLOR_OFF}"
     popd
-    touch deps/wangle_installed
+    touch "${DEPS_DIR}/wangle_installed"
 }
 
 get_zstd() {
-    if [ -f "deps/zstd_installed" ]; then
+    if [ -f "${DEPS_DIR}/zstd_installed" ]; then
         return
     fi
-    rm -rf deps/zstd
+    ZSTD_DIR=$DEPS_DIR/zstd
+    rm -rf "$ZSTD_DIR"
     pushd .
-    cd deps
-    git clone --depth 1 https://github.com/facebook/zstd
-    cd zstd
-    make -j $NCPUS
+    cd "$DEPS_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning zstd repo ${COLOR_OFF}"
+    git clone --depth 1 https://github.com/facebook/zstd --branch v1.3.7
+    cd "$ZSTD_DIR"
+    make -j "$NCPUS"
     sudo make install
+    echo -e "${COLOR_GREEN}zstd is installed ${COLOR_OFF}"
     popd
-    touch deps/zstd_installed
+    touch "${DEPS_DIR}/zstd_installed"
+}
+
+get_fmt() {
+    if [ -f "$DEPS_DIR/fmt_installed" ]; then
+        return
+    fi
+    FMT_DIR=$DEPS_DIR/fmt
+    FMT_BUILD_DIR=$DEPS_DIR/fmt/build/
+    rm -rf "$FMT_DIR"
+    pushd .
+    cd "$DEPS_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning fmt repo ${COLOR_OFF}"
+    git clone https://github.com/fmtlib/fmt
+    mkdir -p "$FMT_BUILD_DIR"
+    cd "$FMT_BUILD_DIR"
+    cmake -DCXX_STD=gnu++14                         \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}fmt is installed ${COLOR_OFF}"
+    popd
+    touch "$DEPS_DIR/fmt_installed"
 }
 
 get_fbthrift() {
-    if [ -f "deps/fbthrift_installed" ]; then
+    if [ -f "$DEPS_DIR/fbthrift_installed" ]; then
         return
     fi
-    rm -rf deps/fbthrift
+    FBTHRIFT_DIR=$DEPS_DIR/fbthrift
+    FBTHRIFT_BUILD_DIR=$DEPS_DIR/fbthrift/build/
+    rm -rf "$FBTHRIFT_DIR"
+    # install fb thrift specific deps
     sudo apt-get install -y \
         libkrb5-dev \
         flex
     pushd .
-    cd deps
+    cd "$DEPS_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning fbthrift repo ${COLOR_OFF}"
     git clone --depth 1 https://github.com/facebook/fbthrift || true
-    cd fbthrift/build
-    cmake ..
-    make -j $NCPUS
-    sudo make install
+    mkdir -p "$FBTHRIFT_BUILD_DIR"
+    cd "$FBTHRIFT_BUILD_DIR"
+    cmake -DCXX_STD=gnu++14                         \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}fbthrift is installed ${COLOR_OFF}"
     popd
-    touch deps/fbthrift_installed
+    touch "$DEPS_DIR/fbthrift_installed"
+}
+
+get_rsocket() {
+    if [ -f "$DEPS_DIR/rsocket_installed" ]; then
+        return
+    fi
+    RSOCKET_DIR=$DEPS_DIR/rsocket-cpp
+    RSOCKET_BUILD_DIR=$DEPS_DIR/rsocket-cpp/build/
+    rm -rf "$RSOCKET_DIR"
+    pushd .
+    cd "$DEPS_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning rsocket repo ${COLOR_OFF}"
+    git clone --depth 1 https://github.com/rsocket/rsocket-cpp || true
+    mkdir -p "$RSOCKET_BUILD_DIR"
+    cd "$RSOCKET_BUILD_DIR" || exit
+    cmake -DCXX_STD=gnu++14                         \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      ..
+    make -j "$NCPUS"
+    make install
+    echo -e "${COLOR_GREEN}rsocket is installed ${COLOR_OFF}"
+    popd
+    touch "$DEPS_DIR/rsocket_installed"
 }
 
 get_grpc() {
-    if [ -f "deps/grpc_installed" ]; then
+    if [ -f "${DEPS_DIR}/grpc_installed" ]; then
         return
     fi
-    rm -rf deps/grpc
+    GO_INSTALLED=$(which go || true)
+    if [ -z "$GO_INSTALLED" ]; then
+        if [ -f /etc/centos-release ]; then
+            sudo yum install -y golang
+        else
+            sudo apt-get install -y golang
+        fi
+    fi
+    GRPC_DIR=$DEPS_DIR/grpc
+    GRPC_BUILD_DIR=$DEPS_DIR/grpc/_build/
+    rm -rf "$GRPC_DIR"
     pushd .
-    cd deps
-    git clone  --depth 1 https://github.com/grpc/grpc
+    cd "$DEPS_DIR"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning grpc repo ${COLOR_OFF}"
+    # pin specific release of grpc to avoid build failures
+    # with new changes in grpc/absl
+    git clone  --depth 1 https://github.com/grpc/grpc --branch v1.27.1
+    # this is to deal with a nested dir
     cd grpc
     git submodule update --init
-    make -j $NCPUS
-    sudo make install
-    cd third_party/protobuf
-    make && sudo make install
+    mkdir -p "$GRPC_BUILD_DIR"
+    cd "$GRPC_BUILD_DIR" || exit
+    cmake -DCXX_STD=gnu++14                         \
+      -DCMAKE_CXX_FLAGS=-Wno-unused-result          \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo             \
+      -DCMAKE_PREFIX_PATH="$INSTALL_DIR"            \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"         \
+      -DgRPC_BUILD_GRPC_CSHARP_PLUGIN=OFF           \
+      -DgRPC_BUILD_GRPC_NODE_PLUGIN=OFF             \
+      -DgRPC_BUILD_GRPC_OBJECTIVE_C_PLUGIN=OFF      \
+      -DgRPC_BUILD_GRPC_PHP_PLUGIN=OFF              \
+      -DgRPC_BUILD_GRPC_RUBY_PLUGIN=OFF             \
+      ..
+
+    make -j "$NCPUS"
+    make install
+    cd "$GRPC_DIR"/third_party/protobuf
+    make && make install
+    echo -e "${COLOR_GREEN}grpc is installed ${COLOR_OFF}"
     popd
-    touch deps/grpc_installed
+    touch "${DEPS_DIR}/grpc_installed"
 }
 
-fix_gtest() {
-    # oss version require this line for gtest to run/work
-    local GTEST_INIT='
-
-int main(int argc, char **argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
-'
-    local TEST_EXISTS=$(grep InitGoogleTest $1 | wc -l)
-    if [ "$TEST_EXISTS" -gt 0 ]; then
+get_libbpf() {
+    if [ -f "${DEPS_DIR}/libbpf_installed" ]; then
         return
     fi
-    echo "$GTEST_INIT" >> $1
-}
-
-katran_oss_tests_fixup() {
-    fix_gtest ./katran/lib/tests/CHHelpersTest.cpp
-    fix_gtest ./katran/lib/tests/IpHelpersTest.cpp
-    fix_gtest ./katran/lib/tests/VipTest.cpp
-    fix_gtest ./katran/lib/tests/KatranLbTest.cpp
-    fix_gtest ./katran/lib/testing/Base64Test.cpp
+    LIBBPF_DIR="${DEPS_DIR}/libbpf"
+    rm -rf "${LIBBPF_DIR}"
+    pushd .
+    cd "${DEPS_DIR}"
+    echo -e "${COLOR_GREEN}[ INFO ] Cloning libbpf repo ${COLOR_OFF}"
+    git clone --depth 1 https://github.com/libbpf/libbpf || true
+    cd "${LIBBPF_DIR}"/src
+    make
+    #on centos the cp -fpR used was throwing an error, so just use a regular cp -R
+    if [ -f /etc/redhat-release ]; then
+        sed -i 's/cp -fpR/cp -R/g' Makefile
+    fi
+    DESTDIR="$INSTALL_DIR" make install
+    cd "$LIBBPF_DIR"
+    cp -r include/uapi "$INSTALL_DIR"/usr/include/bpf/
+    cd "$INSTALL_DIR"/usr/include/bpf
+    # override to use local bpf.h instead of system wide
+    sed -i 's/#include <linux\/bpf.h>/#include <bpf\/uapi\/linux\/bpf.h>/g' ./bpf.h
+    sed -i 's/#include <linux\/bpf.h>/#include <bpf\/uapi\/linux\/bpf.h>/g' ./libbpf.h
+    # Move to CMAKE_PREFIX_PATH so that cmake can easily discover them
+    cd "$INSTALL_DIR"
+    mv "$INSTALL_DIR"/usr/include/bpf "$INSTALL_DIR"/include/
+    cp -r "$INSTALL_DIR"/usr/lib64/* "$INSTALL_DIR"/lib/
+    echo -e "${COLOR_GREEN}libbpf is installed ${COLOR_OFF}"
+    popd
+    touch "${DEPS_DIR}/libbpf_installed"
 }
 
 build_katran() {
     pushd .
-    rm -rf ./build
-    mkdir build
-    cd build
-    cmake ..
-    make
+    KATRAN_BUILD_DIR=$BUILD_DIR/build
+    rm -rf "$KATRAN_BUILD_DIR"
+    mkdir -p "$KATRAN_BUILD_DIR"
+
+    cd "$KATRAN_BUILD_DIR" || exit
+    LIB_BPF_PREFIX="$INSTALL_DIR"
+    cmake -DCMAKE_PREFIX_PATH="$INSTALL_DIR"      \
+      -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"       \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo           \
+      -DPKG_CONFIG_USE_CMAKE_PREFIX_PATH=ON       \
+      -DLIB_BPF_PREFIX="$LIB_BPF_PREFIX"          \
+      -DBUILD_TESTS=On                            \
+      ../..
+    make -j "$NCPUS"
     popd
-     ./build_bpf_modules_opensource.sh 2>/dev/null
+    "${ROOT_DIR}"/build_bpf_modules_opensource.sh \
+        -s "${ROOT_DIR}"                          \
+        -b "${BUILD_DIR}"                         \
+        2>/dev/null
 }
 
 test_katran() {
     pushd .
-    cd build/katran/lib/tests/
+    cd "$BUILD_DIR"/build/katran/lib/tests/
     ctest -v ./*
     cd ../testing/
     ctest -v ./*
@@ -269,20 +597,26 @@ test_katran() {
 }
 
 get_dev_tools
+get_required_libs
+get_libevent
+get_fmt
+get_gflags
 get_folly
 get_clang
-get_required_libs
-get_linux
 get_gtest
-if [ "$BUILD_EXAMPLE" -eq 1 ]; then
+get_libbpf
+if [ "$BUILD_EXAMPLE_THRIFT" -eq 1 ]; then
   get_mstch
+  get_fizz
   get_wangle
   get_zstd
+  get_rsocket
   get_fbthrift
+fi
+if [ "$BUILD_EXAMPLE_GRPC" -eq 1 ]; then
   get_grpc
 fi
 if [ -z "$INSTALL_DEPS_ONLY" ]; then
-  katran_oss_tests_fixup
   build_katran
   test_katran
 fi

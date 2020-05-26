@@ -26,12 +26,20 @@ DEFINE_string(
     bpfpath,
     "/mnt/bpf/xdproot/xdproot_array",
     "path to where we want to pin root_array");
+DEFINE_int32(xdp_flags, 0 , "xdp attachment flags");
 
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   google::InitGoogleLogging(argv[0]);
+  bool shared_map_found = false;
   katran::BpfAdapter adapter;
   int err;
+  auto array_id = adapter.getPinnedBpfObject(FLAGS_bpfpath);
+  if (array_id > 0) {
+    LOG(INFO) << "using shared map for root array";
+    adapter.updateSharedMap("root_array", array_id);
+    shared_map_found = true;
+  }
   err = adapter.loadBpfProg(FLAGS_bpfprog);
   if (err) {
     std::cout << "cant load bpf prog " << FLAGS_bpfprog << std::endl;
@@ -45,12 +53,12 @@ int main(int argc, char** argv) {
   }
 
   // attaching prog to eth0
-  if (adapter.detachXdpProg(FLAGS_intf)) {
+  if (adapter.detachXdpProg(FLAGS_intf, FLAGS_xdp_flags)) {
     std::cout << "can't detach xdp prog\n";
     return 1;
   }
 
-  if (adapter.attachXdpProg(prog_fd, FLAGS_intf)) {
+  if (adapter.attachXdpProg(prog_fd, FLAGS_intf, FLAGS_xdp_flags)) {
     std::cout << "cant attach bpf to interface " << FLAGS_intf << std::endl;
     return 1;
   }
@@ -61,11 +69,12 @@ int main(int argc, char** argv) {
     std::cout << "can't get fd for vip_map\n";
     return 1;
   }
-
-  auto res = adapter.pinBpfObject(root_array, FLAGS_bpfpath);
-  if (res < 0) {
-    std::cout << "can't pin root array\n";
-    return 1;
+  if (!shared_map_found) {
+    auto res = adapter.pinBpfObject(root_array, FLAGS_bpfpath);
+    if (res < 0) {
+      std::cout << "can't pin root array\n";
+      return 1;
+    }
   }
 
   return 0;

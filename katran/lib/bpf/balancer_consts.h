@@ -25,6 +25,11 @@
 #define BE_ETH_P_IP 8
 #define BE_ETH_P_IPV6 56710
 
+// GUE variant 1 using first four bits of inner packet as a pseudo header
+// we are using last two of this four bits to distinct v4 vs v6. see RFC for
+// more details
+#define GUEV1_IPV6MASK 0x30
+
 // functions could return ether drop, pass, tx or we need to further
 // process a packet to figure out what to do with it
 #define FURTHER_PROCESSING -1
@@ -52,10 +57,26 @@
 #define MAX_REALS 4096
 #endif
 
-// we are using first 12bits from quic's connection id to store real's index
-#define MAX_QUIC_REALS 4096
+// maximum number of prefixes in lpm map for src based routing.
+#ifndef MAX_LPM_SRC
+#define MAX_LPM_SRC 3000000
+#endif
+
+#ifndef MAX_DECAP_DST
+#define MAX_DECAP_DST 6
+#endif
+
+// use 16 bits in quic's connection id to store real's index
+#define MAX_QUIC_REALS 65535 // 2^16-1
 
 #define CTL_MAP_SIZE 16
+
+// size of internal prog array
+#define SUBPROGRAMS_ARRAY_SIZE 1
+// position where katran would register itself in prog array
+// for recirculation
+#define RECIRCULATION_INDEX 0
+
 #define CH_RINGS_SIZE (MAX_VIPS * RING_SIZE)
 #define STATS_MAP_SIZE (MAX_VIPS * 2)
 
@@ -90,6 +111,8 @@
 #define F_QUIC_VIP (1 << 2)
 // use only dst port for the hash calculation
 #define F_HASH_DPORT_ONLY (1 << 3)
+// check if src based routing should be used
+#define F_SRC_ROUTING (1 << 4)
 // packet_description flags:
 // the description has been created from icmp msg
 #define F_ICMP (1 << 0)
@@ -101,14 +124,29 @@
 #define DEFAULT_TTL 64
 #endif
 
-// from draft-ietf-quic-transport-05
+// QUIC invariants from draft-ietf-quic-transport-22 and
+// draft-ietf-quic-invariants-06
 #define QUIC_LONG_HEADER 0x80
-#define QUIC_CLIENT_INITIAL 0x02
-#define QUIC_0RTT 0x06
-#define QUIC_CONN_ID_PRESENT 0x40
-#define CLIENT_GENERATED_ID (QUIC_CLIENT_INITIAL | QUIC_0RTT)
-// 1 byte public flags + 8 byte connection id
-#define QUIC_HDR_SIZE 9
+#define QUIC_SHORT_HEADER 0x00
+// Long header packet types (with alignment of 8-bits for packet-type)
+#define QUIC_CLIENT_INITIAL 0x00
+#define QUIC_0RTT 0x10
+#define QUIC_HANDSHAKE 0x20
+#define QUIC_RETRY 0x30
+#define QUIC_PACKET_TYPE_MASK 0x30
+// Fallback version of long header processing
+#define QUIC_VERSION_MVFST_OLD 0xfaceb000
+
+// Implementation specific constants:
+// Require connection id to be of minimum length
+#ifndef QUIC_MIN_CONNID_LEN
+#define QUIC_MIN_CONNID_LEN 8
+#endif
+// explicitly version the connection id
+#ifndef QUIC_CONNID_VERSION
+#define QUIC_CONNID_VERSION 0x1
+#endif
+
 
 // max ethernet packet's size which destination is a vip
 // we need to inforce it because if origin_packet + encap_hdr > MTU
@@ -118,14 +156,28 @@
 #define MAX_PCKT_SIZE 1514
 #endif
 
+// for v4 and v6: initial packet would be truncated to the size of eth header
+// plus ipv4/ipv6 header and few bytes of payload
+#define ICMP_TOOBIG_SIZE 98
+#define ICMP6_TOOBIG_SIZE 262
+
+
+#define ICMP6_TOOBIG_PAYLOAD_SIZE (ICMP6_TOOBIG_SIZE - 6)
+#define ICMP_TOOBIG_PAYLOAD_SIZE (ICMP_TOOBIG_SIZE - 6)
+
 #define NO_FLAGS 0
 
-// offset of the lru cache hit related cntrs
+// offset of the lru cache hit related counters
 #define LRU_CNTRS 0
 #define LRU_MISS_CNTR 1
 #define NEW_CONN_RATE_CNTR 2
 #define FALLBACK_LRU_CNTR 3
-
+// offset of icmp related counters
+#define ICMP_TOOBIG_CNTRS 4
+// offset of src routing lookup counters
+#define LPM_SRC_CNTRS 5
+// offset of remote encaped packets counters
+#define REMOTE_ENCAP_CNTRS 6
 // max ammount of new connections per seconda per core for lru update
 // if we go beyond this value - we will bypass lru update.
 #ifndef MAX_CONN_RATE
@@ -153,5 +205,107 @@
 #ifndef IPIP_V6_PREFIX3
 #define IPIP_V6_PREFIX3 0
 #endif
+
+// default tos/tclass value
+#ifndef DEFAULT_TOS
+#define DEFAULT_TOS 0
+#endif
+
+// specify whether to copy inner packets dscp value to outer encapped packet
+#ifndef COPY_INNER_PACKET_TOS
+#define COPY_INNER_PACKET_TOS 1
+#endif
+
+// defaut GUE dst port
+#ifndef GUE_DPORT
+#define GUE_DPORT 6080
+#endif
+
+#define GUE_CSUM 0
+
+// initial value for jhash hashing function, used to pick up a real server
+#ifndef INIT_JHASH_SEED
+#define INIT_JHASH_SEED CH_RINGS_SIZE
+#endif
+
+// initial value for jhash hashing function, used to pick up a real server
+// w/ ipv6 address
+#ifndef INIT_JHASH_SEED_V6
+#define INIT_JHASH_SEED_V6 MAX_VIPS
+#endif
+
+/*
+ * optional features (requires kernel support. turned off by default)
+ * to be able to enable them, you need to define them in compile time
+ * (pass them with -D flag):
+ *
+ * ICMP_TOOBIG_GENERATION - allow to generate icmp's "packet to big"
+ * if packet's size > MAX_PCKT_SIZE
+ *
+ * LPM_SRC_LOOKUP - allow to do src based routing/dst decision override
+ *
+ * INLINE_DECAP_GENERIC - enables features to allow pckt specific inline
+ * decapsulation
+ *
+ * INLINE_DECAP - allow to do inline decapsulation for ipip and enables
+ * additional features to do so
+ *
+ * INLINE_DECAP_IPIP - allow do to inline ipip decapsulation in XDP context
+ *
+ * INLINE_DECAP_GUE - allow to do inline gue decapsulation in XDP context
+ *
+ * GUE_ENCAP - use GUE (draft-ietf-intarea-gue) as encapsulation method
+ *
+ * KATRAN_INTROSPECTION - katran will start to perfpipe packet's header which
+ * have triggered specific events
+ */
+#ifdef LPM_SRC_LOOKUP
+#ifndef INLINE_DECAP
+#ifndef INLINE_DECAP_GUE
+#define INLINE_DECAP
+#endif // of INLINE_DECAP_GUE
+#endif // of INLINE_DECAP
+#endif // of LPM_SRC_LOOKUP
+
+#ifdef INLINE_DECAP
+#define INLINE_DECAP_IPIP
+#endif
+
+#ifdef INLINE_DECAP_IPIP
+#ifndef INLINE_DECAP_GENERIC
+#define INLINE_DECAP_GENERIC
+#endif // of INLINE_DECAP_GENERIC
+#endif // of INLINE_DECAP_IPIP
+
+#ifdef INLINE_DECAP_GUE
+#ifndef INLINE_DECAP_GENERIC
+#define INLINE_DECAP_GENERIC
+#endif // of INLINE_DECAP_GENERIC
+#endif // of INLINE_DECAP_GUE
+
+#ifdef GUE_ENCAP
+#define PCKT_ENCAP_V4 gue_encap_v4
+#define PCKT_ENCAP_V6 gue_encap_v6
+#define HC_ENCAP hc_encap_gue
+#else
+#define PCKT_ENCAP_V4 encap_v4
+#define PCKT_ENCAP_V6 encap_v6
+#define HC_ENCAP hc_encap_ipip
+#endif
+
+
+/**
+ * positions in pckts_srcs table
+ */
+#define V4_SRC_INDEX 0
+#define V6_SRC_INDEX 1
+
+// maximum size of packets header which we would write to event pipe
+// if KATRAN_INTROSPECTION is enabled
+#ifndef MAX_EVENT_SIZE
+#define MAX_EVENT_SIZE 128
+#endif
+
+#define TCP_NONSYN_LRUMISS 0
 
 #endif // of __BALANCER_CONSTS_H

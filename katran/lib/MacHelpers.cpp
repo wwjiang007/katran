@@ -16,6 +16,8 @@
 
 #include "katran/lib/MacHelpers.h"
 
+#include <glog/logging.h>
+
 #include <folly/Format.h>
 #include <folly/MacAddress.h>
 

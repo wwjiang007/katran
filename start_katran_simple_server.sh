@@ -17,6 +17,22 @@
 
 # this script will start simple_katran_server w/ xdproot
 set -xeo pipefail
-INTERFACE="enp0s3"
-./install_xdproot.sh
-sudo sh -c "./build/example/simple_katran_server -balancer_prog=./deps/linux/bpfprog/bpf/balancer_kern.o -intf=${INTERFACE} -hc_forwarding=false -map_path=/sys/fs/bpf/jmp_${INTERFACE} -prog_pos=2"
+
+if [ -z "${KATRAN_INTERFACE}" ]
+then
+    KATRAN_INTERFACE=enp0s3
+fi
+
+# By default this script assumes to be invoked from the root dir.
+if [ -z "${KATRAN_BUILD_DIR}" ]
+then
+    KATRAN_BUILD_DIR=$(pwd)/_build/build
+fi
+
+if [ -z "${DEPS_DIR}" ]
+then
+    DEPS_DIR=$(pwd)/_build/deps
+fi
+
+./install_xdproot.sh -b "${KATRAN_BUILD_DIR}" -d "${DEPS_DIR}"
+sudo sh -c "${KATRAN_BUILD_DIR}/example/simple_katran_server -balancer_prog=${DEPS_DIR}/bpfprog/bpf/balancer_kern.o -intf=${KATRAN_INTERFACE} -hc_forwarding=false -map_path=/sys/fs/bpf/jmp_${KATRAN_INTERFACE} -prog_pos=2"
